@@ -15,6 +15,8 @@ from ultralytics import YOLO
 from collections import deque
 import time
 import os
+from models.tracking import AdvancedTracker
+from models.image_enhancer import ImageEnhancer
 
 
 class KalmanFilter:
@@ -105,7 +107,8 @@ class PersonDetector:
     """YOLO ile insan tespiti ve takibi sınıfı."""
     
     def __init__(self, model=None, model_name='yolov8m', device=None, threshold=0.3, 
-                 max_disappeared=30, iou_threshold=0.3, area_threshold=100, use_kalman=False):
+                 max_disappeared=30, iou_threshold=0.3, area_threshold=100, use_kalman=False,
+                 use_advanced_tracker=True, use_image_enhancement=True):
         """
         Tespit ve takip için sınıf başlatıcı.
         
@@ -118,6 +121,8 @@ class PersonDetector:
             iou_threshold (float): IoU eşik değeri
             area_threshold (int): Minimum tespit alanı (piksel cinsinden)
             use_kalman (bool): Kalman filtresi kullanıp kullanmama
+            use_advanced_tracker (bool): Gelişmiş takipçi kullanıp kullanmama
+            use_image_enhancement (bool): Görüntü iyileştirme kullanıp kullanmama
         """
         # Cihaz kontrolü
         if device is None:
@@ -149,6 +154,8 @@ class PersonDetector:
         self.area_threshold = area_threshold
         self.use_kalman = use_kalman
         self.track_buffer = 30  # Takip geçmişi tampon boyutu
+        self.use_advanced_tracker = use_advanced_tracker
+        self.use_image_enhancement = use_image_enhancement
         
         # Takip veri yapıları
         self.next_object_id = 0
@@ -160,9 +167,22 @@ class PersonDetector:
         # Hareket analizi veri yapıları
         self.movement_data = {}  # {ID: [center_points]}
         
+        # Gelişmiş takipçi
+        if self.use_advanced_tracker:
+            self.tracker = AdvancedTracker(
+                max_disappeared=max_disappeared,
+                iou_threshold=iou_threshold,
+                min_hits=2,
+                max_age=max_disappeared
+            )
+        
+        # Görüntü iyileştirici
+        if self.use_image_enhancement:
+            self.enhancer = ImageEnhancer()
+        
         print(f"PersonDetector başlatıldı: model={model_name}, threshold={threshold}, "
               f"iou_threshold={iou_threshold}, area_threshold={area_threshold}, "
-              f"use_kalman={use_kalman}")
+              f"use_kalman={use_kalman}, use_advanced_tracker={use_advanced_tracker}")
         
         # Kişi takibi için ID yönetimi
         self.next_id = 0
@@ -211,16 +231,16 @@ class PersonDetector:
         )
         
         # Tespitleri al
-        detections = []
         persons = []
         
         for r in results:
             boxes = r.boxes
             for box in boxes:
                 # Sadece insan sınıfı
-                if box.cls == 0:
+                cls = int(box.cls.item())
+                if cls == 0:
                     # Bounding box
-                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
+                    x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
                     
                     # Küçük nesneleri filtrele
                     area = (x2 - x1) * (y2 - y1)
@@ -233,23 +253,35 @@ class PersonDetector:
                     x2, y2 = min(w, x2), min(h, y2)
                     
                     # Confidence
-                    conf = float(box.conf.cpu().numpy())
+                    conf = float(box.conf.item())
                     
                     # Tespit listesine ekle
                     persons.append((None, [x1, y1, x2, y2], conf))
         
-        # Yeni tespitlerle takip sistemini güncelle
-        self._update_all_tracked_objects(persons)
-        
-        # Güncel takip listesini döndür
-        detections = []
-        for person_id, obj_info in self.tracked_objects.items():
-            if obj_info['disappeared'] == 0:  # Sadece mevcut kareler için
-                detections.append((person_id, obj_info['bbox'], obj_info['confidence']))
-        
-        return detections
+        # Gelişmiş takipçi kullanıyorsak
+        if self.use_advanced_tracker:
+            # Takipçiyi güncelle
+            active_trackers = self.tracker.update(persons)
+            
+            # Aktif takipleri döndür
+            detections = []
+            for track_id, (bbox, conf) in active_trackers.items():
+                detections.append((track_id, bbox, conf))
+            
+            return detections
+        else:
+            # Yeni tespitlerle takip sistemini güncelle
+            self._update_all_tracked_objects(persons)
+            
+            # Güncel takip listesini döndür
+            detections = []
+            for person_id, obj_info in self.tracked_objects.items():
+                if obj_info['disappeared'] == 0:  # Sadece mevcut kareler için
+                    detections.append((person_id, obj_info['bbox'], obj_info['confidence']))
+            
+            return detections
 
-    def detect_in_pool(self, frame, pool_mask=None, pool_threshold=0.2):
+    def detect_in_pool(self, frame, pool_mask=None, pool_threshold=0.2, apply_enhancement=True):
         """
         Havuz içerisindeki insanları daha düşük threshold ile tespit eder.
         
@@ -257,6 +289,7 @@ class PersonDetector:
             frame (ndarray): İşlenecek video karesi
             pool_mask (ndarray): Havuz alanı maskesi (None ise havuz maskesi kullanılmaz)
             pool_threshold (float): Havuz içi tespit eşik değeri
+            apply_enhancement (bool): Görüntü iyileştirme uygulayıp uygulamama
             
         Returns:
             list: [(id, bbox, confidence), ...] formatında tespit listesi
@@ -265,9 +298,40 @@ class PersonDetector:
         if frame is None or frame.size == 0:
             return []
         
+        # Havuz alanına görüntü iyileştirme uygula
+        if self.use_image_enhancement and apply_enhancement and pool_mask is not None:
+            # Görüntü iyileştirmeyi sadece havuz alanına uygula
+            enhanced_frame = self.enhancer.enhance_pool_image(
+                frame, 
+                method="combined", 
+                mask=pool_mask,
+                clip_limit=2.5,
+                gamma=1.3,
+                amount=1.5
+            )
+            
+            # Ayrıca su altı bölgelerini tespit et ve oralara özel iyileştirmeler uygula
+            underwater_mask = self.enhancer.detect_underwater_regions(
+                cv2.bitwise_and(frame, frame, mask=pool_mask)
+            )
+            if underwater_mask.any():
+                # Su altı bölgelerine dehaze filtresi uygula
+                dehazed = self.enhancer.apply_dehazing(
+                    enhanced_frame, 
+                    omega=0.85, 
+                    t0=0.1, 
+                    radius=10
+                )
+                # Sadece tespit edilen su altı bölgelerine uygula
+                underwater_mask_3ch = cv2.merge([underwater_mask, underwater_mask, underwater_mask])
+                enhanced_frame = cv2.bitwise_and(dehazed, underwater_mask_3ch) + \
+                                 cv2.bitwise_and(enhanced_frame, cv2.bitwise_not(underwater_mask_3ch))
+        else:
+            enhanced_frame = frame
+        
         # YOLO ile tespit (düşük eşik değeri)
         results = self.model(
-            frame, 
+            enhanced_frame, 
             conf=pool_threshold,  # Düşük eşik değeri
             verbose=False,
             classes=[0],  # Sadece insan (0) sınıfı için tespit
@@ -283,13 +347,14 @@ class PersonDetector:
             boxes = r.boxes
             for box in boxes:
                 # Sadece insan sınıfı
-                if box.cls == 0:
+                cls = int(box.cls.item())
+                if cls == 0:
                     # Bounding box
-                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
+                    x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
                     
                     # Küçük nesneleri filtrele (havuz içinde daha küçük nesnelere izin ver)
                     area = (x2 - x1) * (y2 - y1)
-                    min_area = self.area_threshold * 0.7  # Havuz içinde daha küçük alanlara izin ver
+                    min_area = self.area_threshold * 0.6  # Havuz içinde daha küçük alanlara izin ver
                     if area < min_area:
                         continue
                     
@@ -305,28 +370,40 @@ class PersonDetector:
                     is_in_pool = True
                     if pool_mask is not None:
                         if 0 <= cy < pool_mask.shape[0] and 0 <= cx < pool_mask.shape[1]:
-                            is_in_pool = pool_mask[cy, cx] > 0.5
+                            is_in_pool = pool_mask[cy, cx] > 0
                         else:
                             is_in_pool = False
                     
                     # Sadece havuz içindeki tespitleri ekle
                     if is_in_pool:
                         # Confidence
-                        conf = float(box.conf.cpu().numpy())
+                        conf = float(box.conf.item())
                         
                         # Tespit listesine ekle
                         persons.append((None, [x1, y1, x2, y2], conf))
         
-        # Yeni tespitlerle takip sistemini güncelle
-        self._update_all_tracked_objects(persons)
-        
-        # Güncel takip listesini döndür
-        detections = []
-        for person_id, obj_info in self.tracked_objects.items():
-            if obj_info['disappeared'] == 0:  # Sadece mevcut kareler için
-                detections.append((person_id, obj_info['bbox'], obj_info['confidence']))
-        
-        return detections
+        # Gelişmiş takipçi kullanıyorsak
+        if self.use_advanced_tracker:
+            # Takipçiyi güncelle
+            active_trackers = self.tracker.update(persons)
+            
+            # Aktif takipleri döndür
+            detections = []
+            for track_id, (bbox, conf) in active_trackers.items():
+                detections.append((track_id, bbox, conf))
+            
+            return detections
+        else:
+            # Yeni tespitlerle takip sistemini güncelle
+            self._update_all_tracked_objects(persons)
+            
+            # Güncel takip listesini döndür
+            detections = []
+            for person_id, obj_info in self.tracked_objects.items():
+                if obj_info['disappeared'] == 0:  # Sadece mevcut kareler için
+                    detections.append((person_id, obj_info['bbox'], obj_info['confidence']))
+            
+            return detections
     
     def _update_tracked_object(self, obj_id, bbox, confidence):
         """
@@ -532,13 +609,21 @@ class PersonDetector:
         return self.tracked_objects
     
     def reset(self):
-        """
-        Takip sistemini sıfırlar.
-        """
-        self.next_id = 0
+        """Tüm takip durumunu sıfırlar."""
+        self.next_object_id = 0
         self.tracked_objects = {}
+        self.movement_data = {}
+        
         if self.use_kalman:
-            self.kalman_filters = {} 
+            self.kalman_filters = {}
+        
+        if self.use_advanced_tracker:
+            self.tracker = AdvancedTracker(
+                max_disappeared=self.max_disappeared,
+                iou_threshold=self.iou_threshold,
+                min_hits=2,
+                max_age=self.max_disappeared
+            )
 
     def _update_all_tracked_objects(self, detections):
         """
@@ -633,7 +718,9 @@ class PersonDetector:
         Returns:
             list: Merkez noktalarının listesi
         """
-        if person_id in self.movement_data:
+        if self.use_advanced_tracker:
+            return self.tracker.get_movement_data(person_id)
+        elif person_id in self.movement_data:
             return self.movement_data[person_id]
         else:
             # Kişi için yeni hareket verisi oluştur

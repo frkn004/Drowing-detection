@@ -46,6 +46,9 @@ def parse_arguments():
     parser.add_argument('--contrast', type=float, default=1.3, help='Havuz kontrast artırma faktörü')
     parser.add_argument('--brightness', type=int, default=10, help='Havuz parlaklık artırma değeri')
     parser.add_argument('--pool_threshold', type=float, default=0.2, help='Havuz tespiti için eşik değeri')
+    parser.add_argument('--advanced_tracker', action='store_true', help='Gelişmiş takip sistemi kullan')
+    parser.add_argument('--enhance_method', type=str, default='combined', 
+                      help='Görüntü iyileştirme yöntemi (simple, clahe, gamma, unsharp, dehaze, combined)')
     return parser.parse_args()
 
 
@@ -349,7 +352,9 @@ def main():
         iou_threshold=args.iou_threshold,
         area_threshold=args.area_threshold,
         max_disappeared=args.max_disappeared,
-        use_kalman=args.use_kalman
+        use_kalman=args.use_kalman,
+        use_advanced_tracker=args.advanced_tracker,
+        use_image_enhancement=args.enhance_pool
     )
     
     # Boğulma tespiti sistemi
@@ -385,6 +390,10 @@ def main():
     if args.use_kalman:
         print("Kalman filtresi takip sistemi aktif.")
     
+    # Gelişmiş takip aktif mi?
+    if args.advanced_tracker:
+        print("Gelişmiş takip sistemi aktif.")
+    
     print(f"İşleme başlanıyor... Toplam kare: {total_frames}")
     
     # Ana işleme döngüsü
@@ -407,34 +416,25 @@ def main():
         if frame_count == 1 and (pool_coords is not None or pool_polygon is not None):
             pool_mask = create_pool_mask(frame.shape, pool_coords, pool_polygon)
         
-        # Görüntüyü geliştir
-        if args.enhance_pool and pool_mask is not None:
-            enhanced_frame = enhance_pool_area(
-                frame, 
-                pool_mask, 
-                contrast=args.contrast, 
-                brightness=args.brightness
-            )
-        else:
-            enhanced_frame = frame.copy()
-        
-        # Tespit işlemi
+        # Görüntüyü geliştir ve tespit işlemi yap
         detections = []
         if args.enhance_pool and pool_mask is not None:
             # Havuz içinde daha düşük eşikle tespit
             detections = detector.detect_in_pool(
-                enhanced_frame, 
+                frame, 
                 pool_mask=pool_mask, 
-                pool_threshold=args.pool_threshold
+                pool_threshold=args.pool_threshold,
+                apply_enhancement=True
             )
         else:
             # Normal tespit
-            detections = detector.detect(enhanced_frame)
+            detections = detector.detect(frame)
         
         # Toplam tespit sayısını güncelle
         total_detections += len(detections)
         
         # Her bir tespit için boğulma analizi
+        drowning_alerts = []
         for person_id, bbox, conf in detections:
             # Kişinin merkez noktasını hesapla
             x1, y1, x2, y2 = bbox
@@ -455,6 +455,10 @@ def main():
             
             # Boğulma analizi
             score, alert = drowning_detector.detect(movement_data, person_id, is_in_pool)
+            
+            # Alarm durumunda listeye ekle
+            if alert:
+                drowning_alerts.append((person_id, bbox, score))
             
             # Renkler
             if alert:
@@ -485,6 +489,12 @@ def main():
             cv2.polylines(frame, [pts], True, (255, 0, 0), 2)
             if len(pool_polygon) > 0:
                 cv2.putText(frame, "Havuz", pool_polygon[0], cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+        
+        # Alarm durumlarını göster
+        if drowning_alerts:
+            warning_text = "UYARI: Boğulma Tehlikesi!"
+            cv2.putText(frame, warning_text, (10, height-20), 
+                      cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
         
         # İşlem süresini hesapla
         end_time = time.time()
