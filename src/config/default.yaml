@@ -1,0 +1,55 @@
+# Havuz Güvenlik Sistemi: Varsayılan Konfigürasyon
+
+# İnsan tespiti parametreleri
+detection:
+  confidence_threshold: 0.5  # Tespit güven eşiği
+  iou_threshold: 0.45        # IoU (Intersection over Union) eşiği
+  max_detections: 30         # Maksimum tespit sayısı
+  track_history_size: 30     # Takip geçmişi boyutu
+
+# Hareket analizi parametreleri
+movement:
+  history_size: 30           # Hareket geçmişi boyutu
+  stillness_threshold: 3     # Hareketsizlik eşiği (piksel)
+  movement_threshold: 5      # Hareket eşiği (piksel)
+  analysis_interval: 2       # Analiz aralığı (kare sayısı)
+
+# Boğulma tespiti parametreleri
+drowning:
+  stillness_threshold: 15    # Hareketsizlik eşiği (kare sayısı)
+  erratic_threshold: 8       # Düzensiz hareket eşiği
+  alert_duration: 3          # Uyarı süresi (saniye)
+  model_type: "rule_based"   # Model tipi: "rule_based" veya "ml"
+  model_path: null           # Özel model dosyasının yolu
+  alert_confidence: 0.6      # Uyarı güven eşiği
+
+# Video işleme parametreleri
+video:
+  width: 640                 # Video genişliği
+  height: 480                # Video yüksekliği
+  fps: 30                    # Kare/saniye hızı
+  buffer_size: 5             # Tampon bellek boyutu
+  enhance_contrast: true     # Kontrast iyileştirme
+
+# Görselleştirme parametreleri
+visualization:
+  show_tracking: true        # Takip çizgilerini göster
+  show_stats: true           # İstatistikleri göster
+  line_thickness: 2          # Çizgi kalınlığı
+  font_scale: 0.6            # Yazı boyutu
+  alert_color: [0, 0, 255]   # Uyarı rengi (BGR)
+  detection_color: [0, 255, 0]  # Tespit rengi (BGR)
+  text_color: [255, 255, 255]   # Yazı rengi (BGR)
+
+# Uyarı parametreleri
+alert:
+  save_alerts: true          # Uyarıları kaydet
+  alert_output_dir: "alerts" # Uyarı çıktı dizini
+  send_notifications: false  # Bildirim gönder
+  notification_method: "log" # Bildirim yöntemi: "log", "email", "sms", vb.
+  
+# Veri kaydı parametreleri  
+logging:
+  log_level: "info"          # Günlükleme seviyesi: "debug", "info", "warning", "error"
+  save_processed_video: true # İşlenmiş videoyu kaydet
+  output_dir: "output"       # Çıktı dizini 
